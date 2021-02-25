@@ -30,7 +30,7 @@ import numpy
 from osgeo import osr
 
 from . import fmaskerrors
-
+import urllib.request
 class Sen2TileMeta(object):
     """
     Metadata for a single 100km tile
@@ -40,9 +40,14 @@ class Sen2TileMeta(object):
         Constructor takes a filename for the XML file of tile-based metadata. 
         
         """
-        f = open(filename)
         
-        root = ElementTree.fromstring(f.read())
+        if filename.startswith('https://'):   
+            file = urllib.request.urlopen(filename).read()
+        else:    
+            f = open(filename)
+            file = f.read()
+        
+        root = ElementTree.fromstring(file)
         # Stoopid XML namespace prefix
         nsPrefix = root.tag[:root.tag.index('}')+1]
         nsDict = {'n1':nsPrefix[1:-1]}

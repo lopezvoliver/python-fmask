@@ -137,3 +137,95 @@ def createOutfile(filename, info):
     sr.ImportFromEPSG(int(info.epsg))
     ds.SetProjection(sr.ExportToWkt())
     return ds
+
+def makeAngles_ee(infile):
+    """
+    Callable function from python 
+    to make the angles image as an ee.Image object
+    infile is the meta (.xml) file and is read directly 
+    from a URL (or file)
+    This function is identical to the main function up until
+    the writing to file part. Here we instead create the ee.Image to return 
+    """
+    import ee
+    info = sen2meta.Sen2TileMeta(filename=infile)
+    
+    nullValDN = 1000
+    
+    # Get a sorted list of the Sentinel-2 band names. Note that sometimes this
+    # is an incomplete list of band names, which appears to be due to a bug in 
+    # earlier versions of ESA's processing software. I suspect it relates to 
+    # Anomaly number 11 in the following page. 
+    # https://sentinel.esa.int/web/sentinel/news/-/article/new-processing-baseline-for-sentinel-2-products
+    bandNames = sorted(info.viewAzimuthDict.keys())
+    
+    # Mean over all bands
+    satAzDeg = numpy.array([info.viewAzimuthDict[i] for i in bandNames])
+    satAzDegMeanOverBands = satAzDeg.mean(axis=0)
+    
+    satZenDeg = numpy.array([info.viewZenithDict[i] for i in bandNames])
+    satZenDegMeanOverBands = satZenDeg.mean(axis=0)
+
+    sunAzDeg = info.sunAzimuthGrid
+    
+    sunZenDeg = info.sunZenithGrid
+    
+    stackDeg = numpy.array([satAzDegMeanOverBands, satZenDegMeanOverBands, sunAzDeg, sunZenDeg])
+    stackRadians = numpy.radians(stackDeg)
+    
+    stackDN = numpy.round(stackRadians / SCALE_TO_RADIANS).astype(numpy.int16)
+    nullmask = numpy.isnan(stackDeg)
+    stackDN[nullmask] = nullValDN
+    
+    lnames = ['SatelliteAzimuth', 'SatelliteZenith', 'SunAzimuth', 'SunZenith']
+
+    # Write data to image. 
+    # see Q here: https://groups.google.com/g/google-earth-engine-developers/c/JKO3YWKMaAw/m/_nqBju2XAQAJ
+    # and A here: https://code.earthengine.google.com/9a04e6f575444bc84dd4fcddf5fdc2ea
+    
+    # We start with the first band (satellite azimuth):
+    data_to_write = ee.Array([
+        stackDN[0].tolist()
+    ]).reshape(list(info.anglesGridShape)).transpose()
+    # Geotransform correct order for ee (not the same as in gdal!):
+    #[xScale, xShearing, xTranslation, yShearing, yScale, yTranslation]
+    gt = [float(info.angleGridXres), float(0), float(info.anglesULXY[0]), float(0), float(-info.angleGridYres), float(info.anglesULXY[1])]
+    projection = ee.Projection('EPSG:{}'.format(info.epsg), gt)
+    # Construct an image of (x,y) pixel coordinates in our projection.
+    coords = ee.Image.pixelCoordinates(projection).floor().int32()
+    # Clamp the coordinates to the valid range of indices into the data array.
+    dimx = data_to_write.length().getInfo()[0]
+    dimy = data_to_write.length().getInfo()[1]
+    x = coords.select('x')
+    y = coords.select('y')
+    coords = coords.updateMask(x.gte(0).And(y.gte(0)).And(x.lt(dimx)).And(y.lt(dimy)))
+    # Now index into the array at the computed coordinates.
+    satAzRadMeanOverBands_ee = ee.Image(data_to_write).arrayGet(coords)
+
+    # Repeat for the other bands:
+    data_to_write = ee.Array([
+        stackDN[1].tolist()
+    ]).reshape(list(info.anglesGridShape)).transpose()
+    satZenRadMeanOverBands_ee = ee.Image(data_to_write).arrayGet(coords)
+    
+    data_to_write = ee.Array([
+        stackDN[2].tolist()
+    ]).reshape(list(info.anglesGridShape)).transpose()
+    sunAzRad_ee = ee.Image(data_to_write).arrayGet(coords)
+    
+    data_to_write = ee.Array([
+        stackDN[3].tolist()
+    ]).reshape(list(info.anglesGridShape)).transpose()
+    sunZenRad_ee = ee.Image(data_to_write).arrayGet(coords)
+    
+    # Create the image by appending the bands:
+    angles_img = satAzRadMeanOverBands_ee.addBands(satZenRadMeanOverBands_ee).addBands(sunAzRad_ee ).addBands(sunZenRad_ee)
+    angles_img = angles_img.select(['constant','constant_1','constant_2', 'constant_3'],lnames)
+    
+    # update mask to not show the null values (1000)?
+    angles_img = angles_img.updateMask(angles_img.neq(nullValDN))
+
+    return(angles_img)
+    
+    
+    
